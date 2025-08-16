@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>多人即時互動地圖</title>
+  <title>多人即時互動地圖 · Admin 版</title>
 
   <!-- Leaflet CSS -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -34,11 +34,12 @@
 
   <div class="topbar">
     <span class="pill" id="uid">未登入</span>
+    <span class="pill" id="roleTag">角色：訪客</span>
     <span class="pill">房間：<span id="roomName">default</span></span>
     <label class="pill">我的顏色 <input id="myColor" type="color" value="#ffcc00" title="我的標記顏色"></label>
     <button id="btnAdd">＋ 在點擊處新增標記</button>
-    <button id="btnEdit" disabled>✎ 僅作者可編輯</button>
-    <button id="btnDel" disabled>🗑 僅作者可刪除</button>
+    <button id="btnEdit" disabled>✎ 編輯選取標記</button>
+    <button id="btnDel" disabled>🗑 刪除選取標記</button>
     <span class="pill" id="ownerTag">擁有者：—</span>
     <span class="pill">提示：點地圖→按「＋」新增；拖曳可移動</span>
   </div>
@@ -85,6 +86,7 @@
       getPendingLatLng: ()=>pendingLatLng,
       clearPending: ()=>{ pendingLatLng=null; },
       setUidText: (t)=>{ const el=document.getElementById('uid'); if(el) el.textContent=t; },
+      setRoleText: (t)=>{ const el=document.getElementById('roleTag'); if(el) el.textContent='角色：'+t; },
       setOwnerUI,
     };
 
@@ -96,18 +98,16 @@
       const m = markers.get(id);
       const owner = m && m.__uid ? m.__uid.slice(0,8) : '—';
       setOwnerUI(owner);
-      // 是否是作者要等 Firebase 模組把 auth.currentUser 掛上來後再決定
-      // 這個函式會在 Firebase 那段的 onAuthStateChanged 裡再呼叫一次
     }
   </script>
 
-  <!-- 2) Firebase：多人即時同步 + 每人顏色（正確用 snap.docs 全量同步） -->
+  <!-- 2) Firebase：多人即時同步 + Admin 權限 + 每人顏色（docChanges 逐筆同步） -->
   <script type="module">
     import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
     import { getAuth, signInAnonymously, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
     import { getFirestore, collection, doc, addDoc, setDoc, deleteDoc, onSnapshot, serverTimestamp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
 
-    // 你的專案設定（沿用你提供的專案，storageBucket 改為官方格式）
+    // === 你的 Firebase 專案設定 ===
     const firebaseConfig = {
       apiKey: "AIzaSyC4-eaG7iIA7liOPnw7L2GLZYo9o9JWTiE",
       authDomain: "map-test-202e0.firebaseapp.com",
@@ -122,7 +122,11 @@
     const auth = getAuth(app);
     const db   = getFirestore(app);
 
-    // 使用者顏色（UID -> 色票，可自行改色）
+    // === Admin 設定：你本人 UID（可加多人） ===
+    const ADMIN_UIDS = new Set(['2E1chD1viMfWagcFvIDnRSwxWf72']);
+    const isAdminUser = (u)=> !!(u && ADMIN_UIDS.has(u.uid));
+
+    // === 使用者顏色（UID -> 色票，可自行改色） ===
     const PALETTE = ['#ef4444','#f97316','#f59e0b','#84cc16','#22c55e','#10b981','#06b6d4','#0ea5e9','#3b82f6','#6366f1','#a855f7','#ec4899','#14b8a6','#8b5cf6','#eab308','#fb7185'];
     const hash = (s)=>{ let h=0; for(let i=0;i<s.length;i++){ h=(h*31 + s.charCodeAt(i))|0; } return Math.abs(h); };
     let userColor = '#ffcc00';
@@ -137,27 +141,28 @@
 
     const iconFor = (color)=> L.divIcon({ className: 'u-dot', html: `<div class="dot" style="background:${color}"></div>`, iconSize: [18,18], iconAnchor: [9,9] });
 
-    // 登入 + 顏色初始化
+    // 匿名登入 + 角色/顏色初始化
     signInAnonymously(auth).catch((e)=> showError('匿名登入失敗：' + e.message));
     onAuthStateChanged(auth, (user)=>{
       const uidShort = user ? ('UID: ' + user.uid.slice(0,8)) : '未登入';
       window.__leafletCtx.setUidText(uidShort);
+      window.__leafletCtx.setRoleText(isAdminUser(user) ? '管理員' : (user ? '一般' : '訪客'));
       // 依 UID 指派穩定顏色（可被使用者覆蓋）
       if (user) {
         const saved = localStorage.getItem('myColor');
         userColor = saved || PALETTE[ hash(user.uid) % PALETTE.length ];
         colorInput.value = userColor;
       }
-      // 重新評估目前選取標記是否為本人
+      // 重新評估目前選取標記是否可管理（作者或 admin）
       const id = getSelectedId();
       const edit = document.getElementById('btnEdit');
       const del  = document.getElementById('btnDel');
       if(!id){ edit.disabled=true; del.disabled=true; setOwnerUI('—'); return; }
       const m = markers.get(id);
-      const isOwner = !!(user && m && m.__uid === user.uid);
-      edit.disabled = !isOwner;
-      del.disabled  = !isOwner;
-      setOwnerUI(m && m.__uid ? (isOwner ? '本人' : m.__uid.slice(0,8)) : '—');
+      const canManage = !!(user && m && (m.__uid === user.uid || isAdminUser(user)));
+      edit.disabled = !canManage;
+      del.disabled  = !canManage;
+      setOwnerUI(m && m.__uid ? (m.__uid === user?.uid ? '本人' : (isAdminUser(user) ? '管理員' : m.__uid.slice(0,8))) : '—');
     });
 
     // 使用者改色：之後新增的點就用新色
@@ -166,68 +171,67 @@
       localStorage.setItem('myColor', userColor);
     });
 
-    // ✅ 用 snap.docs 全量同步，避免覆蓋他人標記
     // ✅ 逐筆同步：新增/修改/刪除；不做全量清理
-onSnapshot(
-  colRef,
-  (snap) => {
-    snap.docChanges().forEach((ch) => {
-      const id = ch.doc.id;
+    onSnapshot(
+      colRef,
+      (snap) => {
+        snap.docChanges().forEach((ch) => {
+          const id = ch.doc.id;
 
-      if (ch.type === 'removed') {
-        const m = markers.get(id);
-        if (m) { m.remove(); markers.delete(id); }
-        if (getSelectedId() === id) setSelectedId(null);
-        return;
-      }
+          if (ch.type === 'removed') {
+            const m = markers.get(id);
+            if (m) { m.remove(); markers.delete(id); }
+            if (getSelectedId() === id) setSelectedId(null);
+            return;
+          }
 
-      const d   = ch.doc.data();             // {x,y,title,color,uid,updatedAt}
-      const ll  = toLatLng(d.x, d.y);
-      const col = d.color || '#ffcc00';
+          const d   = ch.doc.data();             // {x,y,title,color,uid,updatedAt}
+          const ll  = toLatLng(d.x, d.y);
+          const col = d.color || '#ffcc00';
 
-      if (ch.type === 'added' && !markers.has(id)) {
-        const m = L.marker(ll, {
-          draggable: true,
-          title: d.title || '',
-          icon: iconFor(col)                  // 彩色 icon（依作者色）
-        }).addTo(map);
-        m.__uid = d.uid || '?';
+          if (ch.type === 'added' && !markers.has(id)) {
+            const m = L.marker(ll, {
+              draggable: true,
+              title: d.title || '',
+              icon: iconFor(col)                  // 彩色 icon（依作者色）
+            }).addTo(map);
+            m.__uid = d.uid || '?';
 
-        m.on('click', () => {
-          setSelectedId(id);
-          m.openPopup();
-          const user = auth.currentUser;
-          const isOwner = !!(user && m.__uid === user.uid);
-          document.getElementById('btnEdit').disabled = !isOwner;
-          document.getElementById('btnDel').disabled  = !isOwner;
-          setOwnerUI(isOwner ? '本人' : (m.__uid ? m.__uid.slice(0,8) : '—'));
+            m.on('click', () => {
+              setSelectedId(id);
+              m.openPopup();
+              const user = auth.currentUser;
+              const canManage = !!(user && (m.__uid === user.uid || isAdminUser(user)));
+              document.getElementById('btnEdit').disabled = !canManage;
+              document.getElementById('btnDel').disabled  = !canManage;
+              setOwnerUI(canManage && m.__uid !== user?.uid ? '管理員' : (m.__uid === user?.uid ? '本人' : (m.__uid ? m.__uid.slice(0,8) : '—')));
+            });
+
+            m.on('dragend', async () => {
+              const xy = toXY(m.getLatLng());
+              try {
+                // 只更新座標與時間，不改 color/title/uid
+                await setDoc(doc(colRef, id), { x: xy.x, y: xy.y, updatedAt: serverTimestamp() }, { merge: true });
+              } catch (err) { showError('更新失敗：' + err.message); }
+            });
+
+            m.bindPopup(() => `<b>${d.title||'未命名'}</b><br>x=${Math.round(d.x)}, y=${Math.round(d.y)}<br><small>ID:${id}</small>`);
+            markers.set(id, m);
+            return;
+          }
+
+          // modified（或 added 但本地已有）→ 更新內容
+          const m = markers.get(id);
+          if (!m) return; // 防呆
+          m.setLatLng(ll);
+          m.setIcon(iconFor(col));
+          m.options.title = d.title || '';
+          m.__uid = d.uid || m.__uid || '?';
+          m.setPopupContent(`<b>${d.title||'未命名'}</b><br>x=${Math.round(d.x)}, y=${Math.round(d.y)}<br><small>ID:${id}</small>`);
         });
-
-        m.on('dragend', async () => {
-          const xy = toXY(m.getLatLng());
-          try {
-            // 只更新座標與時間，不改 color/title/uid
-            await setDoc(doc(colRef, id), { x: xy.x, y: xy.y, updatedAt: serverTimestamp() }, { merge: true });
-          } catch (err) { showError('更新失敗：' + err.message); }
-        });
-
-        m.bindPopup(() => `<b>${d.title||'未命名'}</b><br>x=${Math.round(d.x)}, y=${Math.round(d.y)}<br><small>ID:${id}</small>`);
-        markers.set(id, m);
-        return;
-      }
-
-      // modified（或 added 但本地已有）→ 更新內容
-      const m = markers.get(id);
-      if (!m) return; // 防呆
-      m.setLatLng(ll);
-      m.setIcon(iconFor(col));
-      m.options.title = d.title || '';
-      m.__uid = d.uid || m.__uid || '?';
-      m.setPopupContent(`<b>${d.title||'未命名'}</b><br>x=${Math.round(d.x)}, y=${Math.round(d.y)}<br><small>ID:${id}</small>`);
-    });
-  },
-  (err) => showError('讀取失敗：' + err.message + '\n（通常是 Firestore 未建立或 Rules 阻擋 read）')
-);
+      },
+      (err) => showError('讀取失敗：' + err.message + '\n（通常是 Firestore 未建立或 Rules 阻擋 read）')
+    );
 
     // 工具列按鈕
     const $ = (id)=>document.getElementById(id);
@@ -255,7 +259,9 @@ onSnapshot(
       const id = getSelectedId();
       if (!id) { alert('先點一下要編輯的標記'); return; }
       const m = markers.get(id); if (!m) return;
-      if(m.__uid !== auth.currentUser.uid){ alert('只能編輯自己的標記'); return; }
+      if(!(isAdminUser(auth.currentUser) || m.__uid === auth.currentUser.uid)){
+        alert('只有作者或管理員可編輯'); return;
+      }
       const cur = m.options.title || '';
       const title = prompt('新的標題：', cur);
       if (title == null) return;
@@ -271,7 +277,9 @@ onSnapshot(
       const id = getSelectedId();
       if (!id) { alert('先點一下要刪除的標記'); return; }
       const m = markers.get(id); if (!m) return;
-      if(m.__uid !== auth.currentUser.uid){ alert('只能刪除自己的標記'); return; }
+      if(!(isAdminUser(auth.currentUser) || m.__uid === auth.currentUser.uid)){
+        alert('只有作者或管理員可刪除'); return;
+      }
       if (!confirm('確定刪除此標記？')) return;
       try{
         await deleteDoc(doc(colRef, id));
@@ -281,5 +289,7 @@ onSnapshot(
 
     map.fitBounds(bounds);
   </script>
+
+  <!-- 提醒：請將 Firestore 規則更新為「作者或 admin 可改/刪」，我已另外提供可直接貼上的 rules。 -->
 </body>
 </html>
