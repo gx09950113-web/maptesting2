@@ -28,6 +28,17 @@
     /* 彩色圓點標記樣式 */
     .u-dot { background: transparent; border: none; }
     .u-dot .dot { width: 16px; height: 16px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 2px rgba(0,0,0,.35); }
+      /* 名稱標籤樣式 */
+    .leaflet-tooltip.mlabel {
+      background: rgba(0,0,0,0.55);
+      color: #fff;
+      border: 0;
+      border-radius: 6px;
+      padding: 2px 6px;
+      font-size: 12px;
+      pointer-events: none;
+      white-space: nowrap;
+    }
   </style>
 </head>
 <body>
@@ -140,6 +151,14 @@
             getSelectedId, setSelectedId, getPendingLatLng, clearPending, setOwnerUI } = window.__leafletCtx;
 
     const iconFor = (color)=> L.divIcon({ className: 'u-dot', html: `<div class="dot" style="background:${color}"></div>`, iconSize: [18,18], iconAnchor: [9,9] });
+    // 顯示名稱的工具函式：在地圖上永久顯示標記名稱
+    const setMarkerLabel = (m, title) => {
+      const txt = (title && String(title).trim()) ? String(title).trim() : '未命名';
+      const tip = m.getTooltip ? m.getTooltip() : null;
+      if (tip) tip.setContent(txt);
+      else m.bindTooltip(txt, {permanent:true, direction:'top', offset:[0,-14], className:'mlabel'});
+      m.options.title = title || '';
+    };
 
     // 匿名登入 + 角色/顏色初始化
     signInAnonymously(auth).catch((e)=> showError('匿名登入失敗：' + e.message));
@@ -197,6 +216,8 @@
             }).addTo(map);
             m.__uid = d.uid || '?';
 
+            setMarkerLabel(m, d.title);
+
             m.on('click', () => {
               setSelectedId(id);
               m.openPopup();
@@ -225,7 +246,7 @@
           if (!m) return; // 防呆
           m.setLatLng(ll);
           m.setIcon(iconFor(col));
-          m.options.title = d.title || '';
+          setMarkerLabel(m, d.title);
           m.__uid = d.uid || m.__uid || '?';
           m.setPopupContent(`<b>${d.title||'未命名'}</b><br>x=${Math.round(d.x)}, y=${Math.round(d.y)}<br><small>ID:${id}</small>`);
         });
