@@ -1,216 +1,232 @@
-<!-- Leaflet 核心程式（如果你頁面已經有，就不用重複放） -->
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-
-<!-- 1) 先初始化底圖（CRS.Simple；2048×2048；map.png） -->
-<script>
-  // === 基本地圖，固定會成功顯示 ===
-  const W = 2048, H = 2048, IMG = 'map.png';
-
-  const map = L.map('map', {
-    crs: L.CRS.Simple,
-    minZoom: -3,
-    wheelPxPerZoomLevel: 80,
-    zoomSnap: 0.25
-  });
-
-  const sw = L.point(0, H), ne = L.point(W, 0);
-  const bounds = L.latLngBounds(map.unproject(sw, 0), map.unproject(ne, 0));
-  L.imageOverlay(IMG, bounds).addTo(map);
-  map.fitBounds(bounds);
-
-  // 像素 <-> LatLng 轉換（CRS.Simple）
-  const toLatLng = (x, y) => map.unproject(L.point(x, y), 0);
-  const toXY     = (latlng) => map.project(latlng, 0);
-
-  // 互動層 & 狀態
-  const markers = new Map();   // docId -> Leaflet Marker
-  let selectedId = null;       // 目前選到的標記
-  let pendingLatLng = null;    // 最近一次點地圖的位置（待新增）
-
-  // 自訂小工具列（左上角）
-  const toolbar = L.control({ position: 'topleft' });
-  toolbar.onAdd = function() {
-    const div = L.DomUtil.create('div', 'leaflet-bar');
-    div.innerHTML = `
-      <a href="#" id="btnAdd"  title="新增標記">＋</a>
-      <a href="#" id="btnEdit" title="編輯標題">✎</a>
-      <a href="#" id="btnDel"  title="刪除標記">🗑</a>
-      <a href="#" id="uidTag"  title="登入狀態" style="pointer-events:none;width:auto;padding:0 6px">未登入</a>
-    `;
-    // 讓滑鼠在工具列上不會拖動地圖
-    L.DomEvent.disableClickPropagation(div);
-    return div;
-  };
-  toolbar.addTo(map);
-
-  // 點地圖：記住座標（等按＋才真的寫入）
-  map.on('click', (e) => {
-    pendingLatLng = e.latlng;
-    L.popup().setLatLng(e.latlng)
-      .setContent('已選座標：按「＋」新增標記')
-      .openOn(map);
-  });
-
-  // 這些函式會在 Firebase 那段用到（先掛到 window 讓後面可使用）
-  window.__leafletCtx = { map, toLatLng, toXY, markers, bounds,
-                          getSelectedId: ()=>selectedId,
-                          setSelectedId: (id)=>{ selectedId=id; },
-                          getPendingLatLng: ()=>pendingLatLng,
-                          clearPending: ()=>{ pendingLatLng=null; },
-                          setUidText: (t)=>{ const el=document.getElementById('uidTag'); if(el) el.textContent=t; },
-                        };
-</script>
-
-<!-- 2) Firebase：多人即時同步 -->
-<script type="module">
-  import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
-  import { getAuth, signInAnonymously, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
-  import { getFirestore, collection, doc, addDoc, setDoc, deleteDoc, onSnapshot, serverTimestamp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
-
-  // === 用你的專案值替換這段 ===
-  const firebaseConfig = {
-  apiKey: "AIzaSyC4-eaG7iIA7liOPnw7L2GLZYo9o9JWTiE",
-  authDomain: "map-test-202e0.firebaseapp.com",
-  projectId: "map-test-202e0",
-  storageBucket: "map-test-202e0.appspot.com",
-  messagingSenderId: "939257699005",
-  appId: "1:939257699005:web:e03994fbd26338c54875d4",
-  measurementId: "G-GC2Z2Q8DZE"
-};
-  // 安全保護：如果還沒改 config，就先跳出（避免整頁報錯）
-  if (firebaseConfig.apiKey.startsWith('__')) {
-    alert('請先在 index.html 中替換 firebaseConfig！');
-    throw new Error('Firebase config missing');
-  }
-
-  // === Firebase 初始化 & 匿名登入 ===
-  const app  = initializeApp(firebaseConfig);
-  const auth = getAuth(app);
-  const db   = getFirestore(app);
-
-  await signInAnonymously(auth).catch((e)=>alert('匿名登入失敗：'+e.message));
-  onAuthStateChanged(auth, (user)=>{
-    const uidShort = user ? ('UID: ' + user.uid.slice(0,8)) : '未登入';
-    window.__leafletCtx.setUidText(uidShort);
-  });
-
-  // === Firestore 即時同步（房間可用 ?room=xxx 切換）===
-  const urlRoom = new URLSearchParams(location.search).get('room');
-  const room = urlRoom || 'default';
-  const colRef = collection(db, 'rooms', room, 'markers');
-
-  const { map, toLatLng, toXY, markers, bounds,
-          getSelectedId, setSelectedId, getPendingLatLng, clearPending } = window.__leafletCtx;
-
-  // 監聽資料變動：新增/更新/刪除
-  onSnapshot(colRef, (snap)=>{
-    const seen = new Set();
-    snap.docChanges().forEach((ch)=>{
-      const id = ch.doc.id;
-
-      if (ch.type === 'removed') {
-        const m = markers.get(id);
-        if (m) { m.remove(); markers.delete(id); }
-        if (getSelectedId() === id) setSelectedId(null);
-        return;
-      }
-
-      // 新增或更新
-      const d = ch.doc.data(); // {x,y,title,color,uid,updatedAt}
-      const ll = toLatLng(d.x, d.y);
-
-      if (!markers.has(id)) {
-        const m = L.marker(ll, { draggable: true, title: d.title || '' }).addTo(map);
-        m.on('click', ()=>{ setSelectedId(id); m.openPopup(); });
-        m.on('dragend', async ()=>{
-          const xy = toXY(m.getLatLng());
-          await setDoc(doc(colRef, id), {
-            x: xy.x, y: xy.y, title: d.title || '',
-            color: d.color || '#ffcc00', uid: d.uid || '?',
-            updatedAt: serverTimestamp(),
-          }, { merge: true });
-        });
-        m.bindPopup(()=>`<b>${d.title||'未命名'}</b><br>x=${Math.round(d.x)}, y=${Math.round(d.y)}<br><small>ID:${id}</small>`);
-        markers.set(id, m);
-      } else {
-        const m = markers.get(id);
-        m.setLatLng(ll);
-        m.options.title = d.title || '';
-        m.setPopupContent(`<b>${d.title||'未命名'}</b><br>x=${Math.round(d.x)}, y=${Math.round(d.y)}<br><small>ID:${id}</small>`);
-      }
-      seen.add(id);
-    });
-
-    // 清理其他端刪掉的
-    for (const [id, m] of markers) {
-      if (!seen.has(id)) { m.remove(); markers.delete(id); }
-    }
-  });
-
-  // === 工具列的按鈕事件 ===
-  const byId = (id)=>document.getElementById(id);
-  byId('btnAdd') .onclick = async (e)=>{
-    e.preventDefault();
-    const latlng = getPendingLatLng();
-    if (!latlng) { alert('先在地圖上點一下，選擇座標，再按＋'); return; }
-    const xy = toXY(latlng);
-    const title = prompt('標記標題？','新標記') || '新標記';
-    await addDoc(colRef, {
-      x: xy.x, y: xy.y, title, color: '#ffcc00',
-      uid: (auth.currentUser && auth.currentUser.uid) || '?',
-      updatedAt: serverTimestamp(),
-    });
-    clearPending();
-  };
-
-  byId('btnEdit').onclick = async (e)=>{
-    e.preventDefault();
-    const id = getSelectedId();
-    if (!id) { alert('先點一下要編輯的標記'); return; }
-    const m = markers.get(id); if (!m) return;
-    const cur = m.options.title || '';
-    const title = prompt('新的標題：', cur);
-    if (title == null) return;
-    const xy = toXY(m.getLatLng());
-    await setDoc(doc(colRef, id), { title, x: xy.x, y: xy.y, updatedAt: serverTimestamp() }, { merge: true });
-  };
-
-  byId('btnDel') .onclick = async (e)=>{
-    e.preventDefault();
-    const id = getSelectedId();
-    if (!id) { alert('先點一下要刪除的標記'); return; }
-    if (!confirm('確定刪除此標記？')) return;
-    await deleteDoc(doc(colRef, id));
-    setSelectedId(null);
-  };
-
-  // 進來時再保險一次把圖置中
-  map.fitBounds(bounds);
-</script>
-
 <!doctype html>
 <html lang="zh-Hant">
 <head>
   <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>多人即時互動地圖</title>
 
-  <!-- ✅ 這行是你缺的：Leaflet 的 CSS -->
+  <!-- Leaflet CSS（沒有它，地圖會看不到） -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 
-  <!-- ✅ 讓地圖容器有高度 -->
+  <!-- 讓地圖有高度 -->
   <style>
     html, body, #map { height: 100%; margin: 0; }
+    .topbar{
+      position:fixed; left:12px; top:12px; z-index:9999;
+      background:rgba(11,18,32,.85); color:#e6eefc;
+      padding:10px 12px; border-radius:12px; border:1px solid #223355;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", Arial;
+    }
+    .topbar button{ margin-right:6px }
+    .pill{ display:inline-block; font-size:12px; padding:4px 8px; border-radius:999px; border:1px solid #2b406a; background:#0e1628; color:#cfe8ff }
+    .errorbox{
+      position:fixed; right:12px; bottom:12px; z-index:9999;
+      max-width:40ch; background:#2b1e1e; color:#ffdede; padding:10px 12px; border:1px solid #5d2b2b; border-radius:10px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; white-space:pre-wrap;
+    }
   </style>
 </head>
 <body>
 
-  <!-- ✅ 一定要有這個容器，id 必須叫 map -->
+  <!-- 控制列（先放著，地圖成功後再綁事件） -->
+  <div class="topbar">
+    <span class="pill" id="uid">未登入</span>
+    <button id="btnAdd">＋ 在點擊處新增標記</button>
+    <button id="btnEdit">✎ 編輯選取標記</button>
+    <button id="btnDel">🗑 刪除選取標記</button>
+    <span class="pill">提示：單擊地圖→建立暫存座標，再按「＋」送出；拖曳標記即可同步位置。</span>
+  </div>
+
+  <!-- 地圖容器：一定要存在且 id="map" -->
   <div id="map"></div>
 
-  <!-- ⬇️ 把你剛剛貼的兩段 <script> 原封不動放在這之後（照你現在的內容即可） -->
-  <!-- 你的「Leaflet 初始化」那段 <script> -->
-  <!-- 你的「Firebase 模組」那段 <script type="module"> -->
+  <!-- Leaflet JS（非模組，保證先把底圖畫出來） -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
+  <!-- 1) 初始化底圖：這段即使 Firebase 爆錯也會正常 -->
+  <script>
+    // 全域錯誤提示（你看不到 Console 也能知道哪裡錯）
+    function showError(msg){
+      let box = document.getElementById('err');
+      if(!box){ box = document.createElement('div'); box.id='err'; box.className='errorbox'; document.body.appendChild(box); }
+      box.textContent = msg;
+    }
+    window.addEventListener('error', e => showError('JS Error: ' + e.message));
+    window.addEventListener('unhandledrejection', e => showError('Promise Error: ' + (e.reason && e.reason.message ? e.reason.message : e.reason)));
+
+    // === 基本地圖，固定會成功顯示 ===
+    const W = 2048, H = 2048, IMG = 'map.png';
+
+    const map = L.map('map', {
+      crs: L.CRS.Simple,
+      minZoom: -3,
+      wheelPxPerZoomLevel: 80,
+      zoomSnap: 0.25
+    });
+
+    const sw = L.point(0, H), ne = L.point(W, 0);
+    const bounds = L.latLngBounds(map.unproject(sw, 0), map.unproject(ne, 0));
+    L.imageOverlay(IMG, bounds).addTo(map);
+    map.fitBounds(bounds);
+
+    // 像素 <-> LatLng（CRS.Simple）
+    const toLatLng = (x, y) => map.unproject(L.point(x, y), 0);
+    const toXY     = (latlng) => map.project(latlng, 0);
+
+    // 狀態
+    const markers = new Map();   // docId -> Leaflet Marker
+    let selectedId = null;       // 目前選到的標記
+    let pendingLatLng = null;    // 最近一次點地圖的位置（待新增）
+
+    // 點地圖：記住座標（等按＋才真的寫入）
+    map.on('click', (e) => {
+      pendingLatLng = e.latlng;
+      L.popup().setLatLng(e.latlng)
+        .setContent('已選座標：按「＋」新增標記')
+        .openOn(map);
+    });
+
+    // 讓 Firebase 那段能拿到 Leaflet 環境
+    window.__leafletCtx = {
+      map, toLatLng, toXY, markers, bounds,
+      getSelectedId: ()=>selectedId,
+      setSelectedId: (id)=>{ selectedId=id; },
+      getPendingLatLng: ()=>pendingLatLng,
+      clearPending: ()=>{ pendingLatLng=null; },
+      setUidText: (t)=>{ const el=document.getElementById('uid'); if(el) el.textContent=t; },
+    };
+  </script>
+
+  <!-- 2) Firebase：多人即時同步（放在後面；不用頂層 await） -->
+  <script type="module">
+    import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
+    import { getAuth, signInAnonymously, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
+    import { getFirestore, collection, doc, addDoc, setDoc, deleteDoc, onSnapshot, serverTimestamp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
+
+    // 你的專案設定（我幫你補回官方格式的 storageBucket）
+    const firebaseConfig = {
+      apiKey: "AIzaSyC4-eaG7iIA7liOPnw7L2GLZYo9o9JWTiE",
+      authDomain: "map-test-202e0.firebaseapp.com",
+      projectId: "map-test-202e0",
+      storageBucket: "map-test-202e0.appspot.com",
+      messagingSenderId: "939257699005",
+      appId: "1:939257699005:web:e03994fbd26338c54875d4",
+      measurementId: "G-GC2Z2Q8DZE"
+    };
+
+    const app  = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db   = getFirestore(app);
+
+    // 匿名登入（不用頂層 await，避免某些環境直接白屏）
+    signInAnonymously(auth)
+      .catch((e)=> showError('匿名登入失敗：' + e.message));
+
+    onAuthStateChanged(auth, (user)=>{
+      const uidShort = user ? ('UID: ' + user.uid.slice(0,8)) : '未登入';
+      window.__leafletCtx.setUidText(uidShort);
+    });
+
+    // Firestore 即時同步（可用 ?room=xxx 切換房間）
+    const room = new URLSearchParams(location.search).get('room') || 'default';
+    const colRef = collection(db, 'rooms', room, 'markers');
+
+    const { map, toLatLng, toXY, markers, bounds,
+            getSelectedId, setSelectedId, getPendingLatLng, clearPending } = window.__leafletCtx;
+
+    // 監聽資料變動
+    onSnapshot(
+      colRef,
+      (snap)=>{
+        const seen = new Set();
+        snap.docChanges().forEach((ch)=>{
+          const id = ch.doc.id;
+
+          if (ch.type === 'removed') {
+            const m = markers.get(id);
+            if (m) { m.remove(); markers.delete(id); }
+            if (getSelectedId() === id) setSelectedId(null);
+            return;
+          }
+
+          const d = ch.doc.data(); // {x,y,title,color,uid,updatedAt}
+          const ll = toLatLng(d.x, d.y);
+
+          if (!markers.has(id)) {
+            const m = L.marker(ll, { draggable: true, title: d.title || '' }).addTo(map);
+            m.on('click', ()=>{ setSelectedId(id); m.openPopup(); });
+            m.on('dragend', async ()=>{
+              const xy = toXY(m.getLatLng());
+              try{
+                await setDoc(doc(colRef, id), {
+                  x: xy.x, y: xy.y, title: d.title || '',
+                  color: d.color || '#ffcc00', uid: d.uid || '?',
+                  updatedAt: serverTimestamp(),
+                }, { merge: true });
+              }catch(err){ showError('更新失敗：' + err.message); }
+            });
+            m.bindPopup(()=>`<b>${d.title||'未命名'}</b><br>x=${Math.round(d.x)}, y=${Math.round(d.y)}<br><small>ID:${id}</small>`);
+            markers.set(id, m);
+          } else {
+            const m = markers.get(id);
+            m.setLatLng(ll);
+            m.options.title = d.title || '';
+            m.setPopupContent(`<b>${d.title||'未命名'}</b><br>x=${Math.round(d.x)}, y=${Math.round(d.y)}<br><small>ID:${id}</small>`);
+          }
+          seen.add(id);
+        });
+        for (const [id, m] of markers) { if (!seen.has(id)) { m.remove(); markers.delete(id); } }
+      },
+      (err)=> showError('讀取失敗：' + err.message + '\n（通常是 Firestore 未建立或 Rules 阻擋 read）')
+    );
+
+    // 工具列按鈕
+    const $ = (id)=>document.getElementById(id);
+    $('btnAdd').onclick = async (e)=>{
+      e.preventDefault();
+      const latlng = getPendingLatLng();
+      if (!latlng) { alert('先在地圖上點一下，選擇座標，再按＋'); return; }
+      const xy = toXY(latlng);
+      const title = prompt('標記標題？','新標記') || '新標記';
+      try{
+        await addDoc(colRef, {
+          x: xy.x, y: xy.y, title, color: '#ffcc00',
+          uid: (auth.currentUser && auth.currentUser.uid) || '?',
+          updatedAt: serverTimestamp(),
+        });
+        clearPending();
+      }catch(err){
+        showError('寫入失敗：' + err.message + '\n\n常見原因：\n1) 未登入（左上仍顯示「未登入」）\n2) 未啟用 Anonymous sign-in\n3) 網域未加入 Authorized domains\n4) Firestore 未建立或 Rules 未開放寫入');
+      }
+    };
+
+    $('btnEdit').onclick = async (e)=>{
+      e.preventDefault();
+      const id = getSelectedId();
+      if (!id) { alert('先點一下要編輯的標記'); return; }
+      const m = markers.get(id); if (!m) return;
+      const cur = m.options.title || '';
+      const title = prompt('新的標題：', cur);
+      if (title == null) return;
+      const xy = toXY(m.getLatLng());
+      try{
+        await setDoc(doc(colRef, id), { title, x: xy.x, y: xy.y, updatedAt: serverTimestamp() }, { merge: true });
+      }catch(err){ showError('更新失敗：' + err.message); }
+    };
+
+    $('btnDel').onclick = async (e)=>{
+      e.preventDefault();
+      const id = getSelectedId();
+      if (!id) { alert('先點一下要刪除的標記'); return; }
+      if (!confirm('確定刪除此標記？')) return;
+      try{
+        await deleteDoc(doc(colRef, id));
+        setSelectedId(null);
+      }catch(err){ showError('刪除失敗：' + err.message); }
+    };
+
+    // 再保險一次把圖置中
+    map.fitBounds(bounds);
+  </script>
 </body>
 </html>
-
