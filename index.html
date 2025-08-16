@@ -167,48 +167,67 @@
     });
 
     // ✅ 用 snap.docs 全量同步，避免覆蓋他人標記
-    onSnapshot(
-      colRef,
-      (snap)=>{
-        const present = new Set();
-        snap.docs.forEach((docSnap)=>{
-          const id = docSnap.id;
-          const d  = docSnap.data();           // {x,y,title,color,uid,updatedAt}
-          const ll = toLatLng(d.x, d.y);
-          const col = d.color || '#ffcc00';
-          present.add(id);
+    // ✅ 逐筆同步：新增/修改/刪除；不做全量清理
+onSnapshot(
+  colRef,
+  (snap) => {
+    snap.docChanges().forEach((ch) => {
+      const id = ch.doc.id;
 
-          if (!markers.has(id)) {
-            const m = L.marker(ll, { draggable: true, title: d.title || '', icon: iconFor(col) }).addTo(map);
-            m.__uid = d.uid || '?';
-            m.on('click', ()=>{ setSelectedId(id); m.openPopup();
-              const user = auth.currentUser; const isOwner = !!(user && m.__uid === user.uid);
-              document.getElementById('btnEdit').disabled = !isOwner;
-              document.getElementById('btnDel').disabled  = !isOwner;
-              setOwnerUI(isOwner ? '本人' : (m.__uid ? m.__uid.slice(0,8) : '—'));
-            });
-            m.on('dragend', async ()=>{
-              const xy = toXY(m.getLatLng());
-              try{
-                await setDoc(doc(colRef, id), { x: xy.x, y: xy.y, updatedAt: serverTimestamp() }, { merge: true });
-              }catch(err){ showError('更新失敗：' + err.message); }
-            });
-            m.bindPopup(()=>`<b>${d.title||'未命名'}</b><br>x=${Math.round(d.x)}, y=${Math.round(d.y)}<br><small>ID:${id}</small>`);
-            markers.set(id, m);
-          } else {
-            const m = markers.get(id);
-            m.setLatLng(ll);
-            m.setIcon(iconFor(col));
-            m.options.title = d.title || '';
-            m.__uid = d.uid || m.__uid || '?';
-            m.setPopupContent(`<b>${d.title||'未命名'}</b><br>x=${Math.round(d.x)}, y=${Math.round(d.y)}<br><small>ID:${id}</small>`);
-          }
+      if (ch.type === 'removed') {
+        const m = markers.get(id);
+        if (m) { m.remove(); markers.delete(id); }
+        if (getSelectedId() === id) setSelectedId(null);
+        return;
+      }
+
+      const d   = ch.doc.data();             // {x,y,title,color,uid,updatedAt}
+      const ll  = toLatLng(d.x, d.y);
+      const col = d.color || '#ffcc00';
+
+      if (ch.type === 'added' && !markers.has(id)) {
+        const m = L.marker(ll, {
+          draggable: true,
+          title: d.title || '',
+          icon: iconFor(col)                  // 彩色 icon（依作者色）
+        }).addTo(map);
+        m.__uid = d.uid || '?';
+
+        m.on('click', () => {
+          setSelectedId(id);
+          m.openPopup();
+          const user = auth.currentUser;
+          const isOwner = !!(user && m.__uid === user.uid);
+          document.getElementById('btnEdit').disabled = !isOwner;
+          document.getElementById('btnDel').disabled  = !isOwner;
+          setOwnerUI(isOwner ? '本人' : (m.__uid ? m.__uid.slice(0,8) : '—'));
         });
-        // 移除集合中已不存在的本地標記
-        for (const [id, m] of markers) { if (!present.has(id)) { m.remove(); markers.delete(id); } }
-      },
-      (err)=> showError('讀取失敗：' + err.message + '\n（通常是 Firestore 未建立或 Rules 阻擋 read）')
-    );
+
+        m.on('dragend', async () => {
+          const xy = toXY(m.getLatLng());
+          try {
+            // 只更新座標與時間，不改 color/title/uid
+            await setDoc(doc(colRef, id), { x: xy.x, y: xy.y, updatedAt: serverTimestamp() }, { merge: true });
+          } catch (err) { showError('更新失敗：' + err.message); }
+        });
+
+        m.bindPopup(() => `<b>${d.title||'未命名'}</b><br>x=${Math.round(d.x)}, y=${Math.round(d.y)}<br><small>ID:${id}</small>`);
+        markers.set(id, m);
+        return;
+      }
+
+      // modified（或 added 但本地已有）→ 更新內容
+      const m = markers.get(id);
+      if (!m) return; // 防呆
+      m.setLatLng(ll);
+      m.setIcon(iconFor(col));
+      m.options.title = d.title || '';
+      m.__uid = d.uid || m.__uid || '?';
+      m.setPopupContent(`<b>${d.title||'未命名'}</b><br>x=${Math.round(d.x)}, y=${Math.round(d.y)}<br><small>ID:${id}</small>`);
+    });
+  },
+  (err) => showError('讀取失敗：' + err.message + '\n（通常是 Firestore 未建立或 Rules 阻擋 read）')
+);
 
     // 工具列按鈕
     const $ = (id)=>document.getElementById(id);
