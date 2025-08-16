@@ -5,10 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>多人即時互動地圖</title>
 
-  <!-- Leaflet CSS（沒有它，地圖會看不到） -->
+  <!-- Leaflet CSS -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 
-  <!-- 讓地圖有高度 -->
   <style>
     html, body, #map { height: 100%; margin: 0; }
     .topbar{
@@ -24,16 +23,16 @@
       max-width:40ch; background:#2b1e1e; color:#ffdede; padding:10px 12px; border:1px solid #5d2b2b; border-radius:10px;
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; white-space:pre-wrap;
     }
-  </style>/* NEW: 彩色圓點標記樣式 */
-.u-dot { background: transparent; border: none; }
-.u-dot .dot {
-  width: 16px; height: 16px; border-radius: 50%;
-  border: 2px solid #fff; box-shadow: 0 0 0 2px rgba(0,0,0,.35);
-}
+    /* 彩色圓點標記樣式 */
+    .u-dot { background: transparent; border: none; }
+    .u-dot .dot {
+      width: 16px; height: 16px; border-radius: 50%;
+      border: 2px solid #fff; box-shadow: 0 0 0 2px rgba(0,0,0,.35);
+    }
+  </style>
 </head>
 <body>
 
-  <!-- 控制列（先放著，地圖成功後再綁事件） -->
   <div class="topbar">
     <span class="pill" id="uid">未登入</span>
     <button id="btnAdd">＋ 在點擊處新增標記</button>
@@ -42,15 +41,12 @@
     <span class="pill">提示：單擊地圖→建立暫存座標，再按「＋」送出；拖曳標記即可同步位置。</span>
   </div>
 
-  <!-- 地圖容器：一定要存在且 id="map" -->
   <div id="map"></div>
 
-  <!-- Leaflet JS（非模組，保證先把底圖畫出來） -->
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
-  <!-- 1) 初始化底圖：這段即使 Firebase 爆錯也會正常 -->
+  <!-- 1) Leaflet：一定把底圖畫出來 -->
   <script>
-    // 全域錯誤提示（你看不到 Console 也能知道哪裡錯）
     function showError(msg){
       let box = document.getElementById('err');
       if(!box){ box = document.createElement('div'); box.id='err'; box.className='errorbox'; document.body.appendChild(box); }
@@ -59,39 +55,25 @@
     window.addEventListener('error', e => showError('JS Error: ' + e.message));
     window.addEventListener('unhandledrejection', e => showError('Promise Error: ' + (e.reason && e.reason.message ? e.reason.message : e.reason)));
 
-    // === 基本地圖，固定會成功顯示 ===
     const W = 2048, H = 2048, IMG = 'map.png';
-
-    const map = L.map('map', {
-      crs: L.CRS.Simple,
-      minZoom: -3,
-      wheelPxPerZoomLevel: 80,
-      zoomSnap: 0.25
-    });
-
+    const map = L.map('map', { crs: L.CRS.Simple, minZoom: -3, wheelPxPerZoomLevel: 80, zoomSnap: 0.25 });
     const sw = L.point(0, H), ne = L.point(W, 0);
     const bounds = L.latLngBounds(map.unproject(sw, 0), map.unproject(ne, 0));
     L.imageOverlay(IMG, bounds).addTo(map);
     map.fitBounds(bounds);
 
-    // 像素 <-> LatLng（CRS.Simple）
     const toLatLng = (x, y) => map.unproject(L.point(x, y), 0);
     const toXY     = (latlng) => map.project(latlng, 0);
 
-    // 狀態
-    const markers = new Map();   // docId -> Leaflet Marker
-    let selectedId = null;       // 目前選到的標記
-    let pendingLatLng = null;    // 最近一次點地圖的位置（待新增）
+    const markers = new Map();
+    let selectedId = null;
+    let pendingLatLng = null;
 
-    // 點地圖：記住座標（等按＋才真的寫入）
     map.on('click', (e) => {
       pendingLatLng = e.latlng;
-      L.popup().setLatLng(e.latlng)
-        .setContent('已選座標：按「＋」新增標記')
-        .openOn(map);
+      L.popup().setLatLng(e.latlng).setContent('已選座標：按「＋」新增標記').openOn(map);
     });
 
-    // 讓 Firebase 那段能拿到 Leaflet 環境
     window.__leafletCtx = {
       map, toLatLng, toXY, markers, bounds,
       getSelectedId: ()=>selectedId,
@@ -102,13 +84,12 @@
     };
   </script>
 
-  <!-- 2) Firebase：多人即時同步（放在後面；不用頂層 await） -->
+  <!-- 2) Firebase：多人即時同步 + 每人顏色 -->
   <script type="module">
     import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
     import { getAuth, signInAnonymously, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
     import { getFirestore, collection, doc, addDoc, setDoc, deleteDoc, onSnapshot, serverTimestamp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
 
-    // 你的專案設定（我幫你補回官方格式的 storageBucket）
     const firebaseConfig = {
       apiKey: "AIzaSyC4-eaG7iIA7liOPnw7L2GLZYo9o9JWTiE",
       authDomain: "map-test-202e0.firebaseapp.com",
@@ -121,67 +102,50 @@
 
     const app  = initializeApp(firebaseConfig);
     const auth = getAuth(app);
-    const db   = getFirestore(app);// === 使用者顏色：預設用 UID 決定（可被使用者改色） ===
-const PALETTE = [
-  '#ef4444','#f97316','#f59e0b','#84cc16','#22c55e','#10b981',
-  '#06b6d4','#0ea5e9','#3b82f6','#6366f1','#a855f7','#ec4899',
-  '#14b8a6','#8b5cf6','#eab308','#fb7185'
-];
-const hash = (s)=>{ let h=0; for(let i=0;i<s.length;i++){ h=(h*31 + s.charCodeAt(i))|0; } return Math.abs(h); };
-let userColor = '#ffcc00';  // 預設先給一色
+    const db   = getFirestore(app);
 
-// UI：在現有 topbar 動態加一個顏色選擇器
-const topbar = document.querySelector('.topbar');
-const colorWrap = document.createElement('span');
-colorWrap.style.marginLeft = '8px';
-colorWrap.innerHTML = `<span class="pill" style="margin-right:6px">我的顏色</span><input id="myColor" type="color" value="#ffcc00" title="我的標記顏色">`;
-topbar.appendChild(colorWrap);
-const colorInput = document.getElementById('myColor');
+    // 使用者顏色（UID -> 色票，可自行改色）
+    const PALETTE = ['#ef4444','#f97316','#f59e0b','#84cc16','#22c55e','#10b981','#06b6d4','#0ea5e9','#3b82f6','#6366f1','#a855f7','#ec4899','#14b8a6','#8b5cf6','#eab308','#fb7185'];
+    const hash = (s)=>{ let h=0; for(let i=0;i<s.length;i++){ h=(h*31 + s.charCodeAt(i))|0; } return Math.abs(h); };
+    let userColor = '#ffcc00';
 
-// 登入後：決定顏色（先讀 localStorage，沒有就用 UID 推一個）
-onAuthStateChanged(auth, (user)=>{
-  const uidShort = user ? ('UID: ' + user.uid.slice(0,8)) : '未登入';
-  window.__leafletCtx.setUidText(uidShort);
+    const topbar = document.querySelector('.topbar');
+    const colorWrap = document.createElement('span');
+    colorWrap.style.marginLeft = '8px';
+    colorWrap.innerHTML = `<span class="pill" style="margin-right:6px">我的顏色</span><input id="myColor" type="color" value="#ffcc00" title="我的標記顏色">`;
+    topbar.appendChild(colorWrap);
+    const colorInput = document.getElementById('myColor');
 
-  if (user) {
-    const saved = localStorage.getItem('myColor');
-    userColor = saved || PALETTE[ hash(user.uid) % PALETTE.length ];
-    colorInput.value = userColor;
-  }
-});
+    const iconFor = (color)=> L.divIcon({
+      className: 'u-dot',
+      html: `<div class="dot" style="background:${color}"></div>`,
+      iconSize: [18,18],
+      iconAnchor: [9,9]
+    });
 
-// 使用者改色：之後新增的點就用新色
-colorInput.addEventListener('input', ()=>{
-  userColor = colorInput.value;
-  localStorage.setItem('myColor', userColor);
-});
-
-// 產生彩色圓點 icon
-const iconFor = (color)=> L.divIcon({
-  className: 'u-dot',
-  html: `<div class="dot" style="background:${color}"></div>`,
-  iconSize: [18,18],
-  iconAnchor: [9,9]
-});
-
-
-    // 匿名登入（不用頂層 await，避免某些環境直接白屏）
-    signInAnonymously(auth)
-      .catch((e)=> showError('匿名登入失敗：' + e.message));
-
+    signInAnonymously(auth).catch((e)=> showError('匿名登入失敗：' + e.message));
     onAuthStateChanged(auth, (user)=>{
       const uidShort = user ? ('UID: ' + user.uid.slice(0,8)) : '未登入';
       window.__leafletCtx.setUidText(uidShort);
+      if (user) {
+        const saved = localStorage.getItem('myColor');
+        userColor = saved || PALETTE[ hash(user.uid) % PALETTE.length ];
+        colorInput.value = userColor;
+      }
     });
 
-    // Firestore 即時同步（可用 ?room=xxx 切換房間）
+    colorInput.addEventListener('input', ()=>{
+      userColor = colorInput.value;
+      localStorage.setItem('myColor', userColor);
+    });
+
     const room = new URLSearchParams(location.search).get('room') || 'default';
     const colRef = collection(db, 'rooms', room, 'markers');
 
     const { map, toLatLng, toXY, markers, bounds,
             getSelectedId, setSelectedId, getPendingLatLng, clearPending } = window.__leafletCtx;
 
-    // 監聽資料變動
+    // 單一版 onSnapshot（含彩色 icon、拖曳只更新座標）
     onSnapshot(
       colRef,
       (snap)=>{
@@ -196,38 +160,37 @@ const iconFor = (color)=> L.divIcon({
             return;
           }
 
-          const d = ch.doc.data(); // {x,y,title,color,uid,updatedAt}
-          const ll = toLatLng(d.x, d.y);
+          const d = ch.doc.data();     // {x,y,title,color,uid,updatedAt}
+          const ll  = toLatLng(d.x, d.y);
+          const col = d.color || '#ffcc00';
 
           if (!markers.has(id)) {
-            const m = L.marker(ll, { draggable: true, title: d.title || '' }).addTo(map);
+            const m = L.marker(ll, { draggable: true, title: d.title || '', icon: iconFor(col) }).addTo(map);
             m.on('click', ()=>{ setSelectedId(id); m.openPopup(); });
             m.on('dragend', async ()=>{
               const xy = toXY(m.getLatLng());
-              try{
-                await setDoc(doc(colRef, id), {
-                  x: xy.x, y: xy.y, title: d.title || '',
-                  color: d.color || '#ffcc00', uid: d.uid || '?',
-                  updatedAt: serverTimestamp(),
-                }, { merge: true });
-              }catch(err){ showError('更新失敗：' + err.message); }
+              try {
+                await setDoc(doc(colRef, id), { x: xy.x, y: xy.y, updatedAt: serverTimestamp() }, { merge: true });
+              } catch (err) { showError('更新失敗：' + err.message); }
             });
             m.bindPopup(()=>`<b>${d.title||'未命名'}</b><br>x=${Math.round(d.x)}, y=${Math.round(d.y)}<br><small>ID:${id}</small>`);
             markers.set(id, m);
           } else {
             const m = markers.get(id);
             m.setLatLng(ll);
+            m.setIcon(iconFor(col));
             m.options.title = d.title || '';
             m.setPopupContent(`<b>${d.title||'未命名'}</b><br>x=${Math.round(d.x)}, y=${Math.round(d.y)}<br><small>ID:${id}</small>`);
           }
           seen.add(id);
         });
-        for (const [id, m] of markers) { if (!seen.has(id)) { m.remove(); markers.delete(id); } }
+        for (const [id, m] of markers) {
+          if (!seen.has(id)) { m.remove(); markers.delete(id); }
+        }
       },
       (err)=> showError('讀取失敗：' + err.message + '\n（通常是 Firestore 未建立或 Rules 阻擋 read）')
     );
 
-    // 工具列按鈕
     const $ = (id)=>document.getElementById(id);
     $('btnAdd').onclick = async (e)=>{
       e.preventDefault();
@@ -237,14 +200,13 @@ const iconFor = (color)=> L.divIcon({
       const title = prompt('標記標題？','新標記') || '新標記';
       try{
         await addDoc(colRef, {
-          x: xy.x, y: xy.y, title, color: '#ffcc00',
+          x: xy.x, y: xy.y, title,
+          color: userColor,
           uid: (auth.currentUser && auth.currentUser.uid) || '?',
           updatedAt: serverTimestamp(),
         });
         clearPending();
-      }catch(err){
-        showError('寫入失敗：' + err.message + '\n\n常見原因：\n1) 未登入（左上仍顯示「未登入」）\n2) 未啟用 Anonymous sign-in\n3) 網域未加入 Authorized domains\n4) Firestore 未建立或 Rules 未開放寫入');
-      }
+      }catch(err){ showError('寫入失敗：' + err.message); }
     };
 
     $('btnEdit').onclick = async (e)=>{
@@ -272,10 +234,7 @@ const iconFor = (color)=> L.divIcon({
       }catch(err){ showError('刪除失敗：' + err.message); }
     };
 
-    // 再保險一次把圖置中
     map.fitBounds(bounds);
   </script>
 </body>
 </html>
-
-
