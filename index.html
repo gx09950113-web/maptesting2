@@ -123,7 +123,7 @@
     const db   = getFirestore(app);
 
     // === Admin 設定：你本人 UID（可加多人） ===
-    const ADMIN_UIDS = new Set(['2E1chD1viMfWagcFvIDnRSwxWf72']);
+    const ADMIN_UIDS = new Set(['2E1chD1viMfWagcFvIDnRSwxWf72','eyW2AJcLOmTsHb9DR9pGHzqbJvJ3']);
     const isAdminUser = (u)=> !!(u && ADMIN_UIDS.has(u.uid));
 
     // === 使用者顏色（UID -> 色票，可自行改色） ===
