@@ -121,7 +121,49 @@
 
     const app  = initializeApp(firebaseConfig);
     const auth = getAuth(app);
-    const db   = getFirestore(app);
+    const db   = getFirestore(app);// === 使用者顏色：預設用 UID 決定（可被使用者改色） ===
+const PALETTE = [
+  '#ef4444','#f97316','#f59e0b','#84cc16','#22c55e','#10b981',
+  '#06b6d4','#0ea5e9','#3b82f6','#6366f1','#a855f7','#ec4899',
+  '#14b8a6','#8b5cf6','#eab308','#fb7185'
+];
+const hash = (s)=>{ let h=0; for(let i=0;i<s.length;i++){ h=(h*31 + s.charCodeAt(i))|0; } return Math.abs(h); };
+let userColor = '#ffcc00';  // 預設先給一色
+
+// UI：在現有 topbar 動態加一個顏色選擇器
+const topbar = document.querySelector('.topbar');
+const colorWrap = document.createElement('span');
+colorWrap.style.marginLeft = '8px';
+colorWrap.innerHTML = `<span class="pill" style="margin-right:6px">我的顏色</span><input id="myColor" type="color" value="#ffcc00" title="我的標記顏色">`;
+topbar.appendChild(colorWrap);
+const colorInput = document.getElementById('myColor');
+
+// 登入後：決定顏色（先讀 localStorage，沒有就用 UID 推一個）
+onAuthStateChanged(auth, (user)=>{
+  const uidShort = user ? ('UID: ' + user.uid.slice(0,8)) : '未登入';
+  window.__leafletCtx.setUidText(uidShort);
+
+  if (user) {
+    const saved = localStorage.getItem('myColor');
+    userColor = saved || PALETTE[ hash(user.uid) % PALETTE.length ];
+    colorInput.value = userColor;
+  }
+});
+
+// 使用者改色：之後新增的點就用新色
+colorInput.addEventListener('input', ()=>{
+  userColor = colorInput.value;
+  localStorage.setItem('myColor', userColor);
+});
+
+// 產生彩色圓點 icon
+const iconFor = (color)=> L.divIcon({
+  className: 'u-dot',
+  html: `<div class="dot" style="background:${color}"></div>`,
+  iconSize: [18,18],
+  iconAnchor: [9,9]
+});
+
 
     // 匿名登入（不用頂層 await，避免某些環境直接白屏）
     signInAnonymously(auth)
@@ -235,4 +277,5 @@
   </script>
 </body>
 </html>
+
 
