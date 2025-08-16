@@ -15,30 +15,32 @@
       background:rgba(11,18,32,.85); color:#e6eefc;
       padding:10px 12px; border-radius:12px; border:1px solid #223355;
       font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", Arial;
+      display:flex; flex-wrap:wrap; gap:8px; align-items:center;
     }
-    .topbar button{ margin-right:6px }
-    .pill{ display:inline-block; font-size:12px; padding:4px 8px; border-radius:999px; border:1px solid #2b406a; background:#0e1628; color:#cfe8ff }
+    .topbar button{ margin-right:0 }
+    .pill{ display:inline-flex; align-items:center; gap:6px; font-size:12px; padding:4px 8px; border-radius:999px; border:1px solid #2b406a; background:#0e1628; color:#cfe8ff }
+    .pill input[type="color"]{ width:24px; height:18px; padding:0; border:none; background:transparent; cursor:pointer }
     .errorbox{
       position:fixed; right:12px; bottom:12px; z-index:9999;
-      max-width:40ch; background:#2b1e1e; color:#ffdede; padding:10px 12px; border:1px solid #5d2b2b; border-radius:10px;
+      max-width:48ch; background:#2b1e1e; color:#ffdede; padding:10px 12px; border:1px solid #5d2b2b; border-radius:10px;
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; white-space:pre-wrap;
     }
     /* 彩色圓點標記樣式 */
     .u-dot { background: transparent; border: none; }
-    .u-dot .dot {
-      width: 16px; height: 16px; border-radius: 50%;
-      border: 2px solid #fff; box-shadow: 0 0 0 2px rgba(0,0,0,.35);
-    }
+    .u-dot .dot { width: 16px; height: 16px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 2px rgba(0,0,0,.35); }
   </style>
 </head>
 <body>
 
   <div class="topbar">
     <span class="pill" id="uid">未登入</span>
+    <span class="pill">房間：<span id="roomName">default</span></span>
+    <label class="pill">我的顏色 <input id="myColor" type="color" value="#ffcc00" title="我的標記顏色"></label>
     <button id="btnAdd">＋ 在點擊處新增標記</button>
-    <button id="btnEdit">✎ 編輯選取標記</button>
-    <button id="btnDel">🗑 刪除選取標記</button>
-    <span class="pill">提示：單擊地圖→建立暫存座標，再按「＋」送出；拖曳標記即可同步位置。</span>
+    <button id="btnEdit" disabled>✎ 僅作者可編輯</button>
+    <button id="btnDel" disabled>🗑 僅作者可刪除</button>
+    <span class="pill" id="ownerTag">擁有者：—</span>
+    <span class="pill">提示：點地圖→按「＋」新增；拖曳可移動</span>
   </div>
 
   <div id="map"></div>
@@ -65,31 +67,47 @@
     const toLatLng = (x, y) => map.unproject(L.point(x, y), 0);
     const toXY     = (latlng) => map.project(latlng, 0);
 
-    const markers = new Map();
-    let selectedId = null;
-    let pendingLatLng = null;
+    const markers = new Map(); // id -> Leaflet marker（加上自訂 m.__uid ）
+    let selectedId = null;     // 目前選取標記 id
+    let pendingLatLng = null;  // 點地圖之後待新增的位置
 
     map.on('click', (e) => {
       pendingLatLng = e.latlng;
       L.popup().setLatLng(e.latlng).setContent('已選座標：按「＋」新增標記').openOn(map);
     });
 
+    function setOwnerUI(text){ const el = document.getElementById('ownerTag'); if(el) el.textContent = '擁有者：' + text; }
+
     window.__leafletCtx = {
       map, toLatLng, toXY, markers, bounds,
       getSelectedId: ()=>selectedId,
-      setSelectedId: (id)=>{ selectedId=id; },
+      setSelectedId: (id)=>{ selectedId=id; updateButtons(); },
       getPendingLatLng: ()=>pendingLatLng,
       clearPending: ()=>{ pendingLatLng=null; },
       setUidText: (t)=>{ const el=document.getElementById('uid'); if(el) el.textContent=t; },
+      setOwnerUI,
     };
+
+    function updateButtons(){
+      const edit = document.getElementById('btnEdit');
+      const del  = document.getElementById('btnDel');
+      const id = selectedId;
+      if(!id){ edit.disabled = true; del.disabled = true; setOwnerUI('—'); return; }
+      const m = markers.get(id);
+      const owner = m && m.__uid ? m.__uid.slice(0,8) : '—';
+      setOwnerUI(owner);
+      // 是否是作者要等 Firebase 模組把 auth.currentUser 掛上來後再決定
+      // 這個函式會在 Firebase 那段的 onAuthStateChanged 裡再呼叫一次
+    }
   </script>
 
-  <!-- 2) Firebase：多人即時同步 + 每人顏色 -->
+  <!-- 2) Firebase：多人即時同步 + 每人顏色（正確用 snap.docs 全量同步） -->
   <script type="module">
     import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
     import { getAuth, signInAnonymously, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
     import { getFirestore, collection, doc, addDoc, setDoc, deleteDoc, onSnapshot, serverTimestamp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
 
+    // 你的專案設定（沿用你提供的專案，storageBucket 改為官方格式）
     const firebaseConfig = {
       apiKey: "AIzaSyC4-eaG7iIA7liOPnw7L2GLZYo9o9JWTiE",
       authDomain: "map-test-202e0.firebaseapp.com",
@@ -109,69 +127,71 @@
     const hash = (s)=>{ let h=0; for(let i=0;i<s.length;i++){ h=(h*31 + s.charCodeAt(i))|0; } return Math.abs(h); };
     let userColor = '#ffcc00';
 
-    const topbar = document.querySelector('.topbar');
-    const colorWrap = document.createElement('span');
-    colorWrap.style.marginLeft = '8px';
-    colorWrap.innerHTML = `<span class="pill" style="margin-right:6px">我的顏色</span><input id="myColor" type="color" value="#ffcc00" title="我的標記顏色">`;
-    topbar.appendChild(colorWrap);
     const colorInput = document.getElementById('myColor');
+    const room = new URLSearchParams(location.search).get('room') || 'default';
+    document.getElementById('roomName').textContent = room;
+    const colRef = collection(db, 'rooms', room, 'markers');
 
-    const iconFor = (color)=> L.divIcon({
-      className: 'u-dot',
-      html: `<div class="dot" style="background:${color}"></div>`,
-      iconSize: [18,18],
-      iconAnchor: [9,9]
-    });
+    const { map, toLatLng, toXY, markers, bounds,
+            getSelectedId, setSelectedId, getPendingLatLng, clearPending, setOwnerUI } = window.__leafletCtx;
 
+    const iconFor = (color)=> L.divIcon({ className: 'u-dot', html: `<div class="dot" style="background:${color}"></div>`, iconSize: [18,18], iconAnchor: [9,9] });
+
+    // 登入 + 顏色初始化
     signInAnonymously(auth).catch((e)=> showError('匿名登入失敗：' + e.message));
     onAuthStateChanged(auth, (user)=>{
       const uidShort = user ? ('UID: ' + user.uid.slice(0,8)) : '未登入';
       window.__leafletCtx.setUidText(uidShort);
+      // 依 UID 指派穩定顏色（可被使用者覆蓋）
       if (user) {
         const saved = localStorage.getItem('myColor');
         userColor = saved || PALETTE[ hash(user.uid) % PALETTE.length ];
         colorInput.value = userColor;
       }
+      // 重新評估目前選取標記是否為本人
+      const id = getSelectedId();
+      const edit = document.getElementById('btnEdit');
+      const del  = document.getElementById('btnDel');
+      if(!id){ edit.disabled=true; del.disabled=true; setOwnerUI('—'); return; }
+      const m = markers.get(id);
+      const isOwner = !!(user && m && m.__uid === user.uid);
+      edit.disabled = !isOwner;
+      del.disabled  = !isOwner;
+      setOwnerUI(m && m.__uid ? (isOwner ? '本人' : m.__uid.slice(0,8)) : '—');
     });
 
+    // 使用者改色：之後新增的點就用新色
     colorInput.addEventListener('input', ()=>{
       userColor = colorInput.value;
       localStorage.setItem('myColor', userColor);
     });
 
-    const room = new URLSearchParams(location.search).get('room') || 'default';
-    const colRef = collection(db, 'rooms', room, 'markers');
-
-    const { map, toLatLng, toXY, markers, bounds,
-            getSelectedId, setSelectedId, getPendingLatLng, clearPending } = window.__leafletCtx;
-
-    // 單一版 onSnapshot（含彩色 icon、拖曳只更新座標）
+    // ✅ 用 snap.docs 全量同步，避免覆蓋他人標記
     onSnapshot(
       colRef,
       (snap)=>{
-        const seen = new Set();
-        snap.docChanges().forEach((ch)=>{
-          const id = ch.doc.id;
-
-          if (ch.type === 'removed') {
-            const m = markers.get(id);
-            if (m) { m.remove(); markers.delete(id); }
-            if (getSelectedId() === id) setSelectedId(null);
-            return;
-          }
-
-          const d = ch.doc.data();     // {x,y,title,color,uid,updatedAt}
-          const ll  = toLatLng(d.x, d.y);
+        const present = new Set();
+        snap.docs.forEach((docSnap)=>{
+          const id = docSnap.id;
+          const d  = docSnap.data();           // {x,y,title,color,uid,updatedAt}
+          const ll = toLatLng(d.x, d.y);
           const col = d.color || '#ffcc00';
+          present.add(id);
 
           if (!markers.has(id)) {
             const m = L.marker(ll, { draggable: true, title: d.title || '', icon: iconFor(col) }).addTo(map);
-            m.on('click', ()=>{ setSelectedId(id); m.openPopup(); });
+            m.__uid = d.uid || '?';
+            m.on('click', ()=>{ setSelectedId(id); m.openPopup();
+              const user = auth.currentUser; const isOwner = !!(user && m.__uid === user.uid);
+              document.getElementById('btnEdit').disabled = !isOwner;
+              document.getElementById('btnDel').disabled  = !isOwner;
+              setOwnerUI(isOwner ? '本人' : (m.__uid ? m.__uid.slice(0,8) : '—'));
+            });
             m.on('dragend', async ()=>{
               const xy = toXY(m.getLatLng());
-              try {
+              try{
                 await setDoc(doc(colRef, id), { x: xy.x, y: xy.y, updatedAt: serverTimestamp() }, { merge: true });
-              } catch (err) { showError('更新失敗：' + err.message); }
+              }catch(err){ showError('更新失敗：' + err.message); }
             });
             m.bindPopup(()=>`<b>${d.title||'未命名'}</b><br>x=${Math.round(d.x)}, y=${Math.round(d.y)}<br><small>ID:${id}</small>`);
             markers.set(id, m);
@@ -180,20 +200,21 @@
             m.setLatLng(ll);
             m.setIcon(iconFor(col));
             m.options.title = d.title || '';
+            m.__uid = d.uid || m.__uid || '?';
             m.setPopupContent(`<b>${d.title||'未命名'}</b><br>x=${Math.round(d.x)}, y=${Math.round(d.y)}<br><small>ID:${id}</small>`);
           }
-          seen.add(id);
         });
-        for (const [id, m] of markers) {
-          if (!seen.has(id)) { m.remove(); markers.delete(id); }
-        }
+        // 移除集合中已不存在的本地標記
+        for (const [id, m] of markers) { if (!present.has(id)) { m.remove(); markers.delete(id); } }
       },
       (err)=> showError('讀取失敗：' + err.message + '\n（通常是 Firestore 未建立或 Rules 阻擋 read）')
     );
 
+    // 工具列按鈕
     const $ = (id)=>document.getElementById(id);
     $('btnAdd').onclick = async (e)=>{
       e.preventDefault();
+      if(!auth.currentUser){ alert('尚未登入，請稍候再試'); return; }
       const latlng = getPendingLatLng();
       if (!latlng) { alert('先在地圖上點一下，選擇座標，再按＋'); return; }
       const xy = toXY(latlng);
@@ -202,7 +223,7 @@
         await addDoc(colRef, {
           x: xy.x, y: xy.y, title,
           color: userColor,
-          uid: (auth.currentUser && auth.currentUser.uid) || '?',
+          uid: auth.currentUser.uid,
           updatedAt: serverTimestamp(),
         });
         clearPending();
@@ -211,9 +232,11 @@
 
     $('btnEdit').onclick = async (e)=>{
       e.preventDefault();
+      if(!auth.currentUser){ alert('尚未登入'); return; }
       const id = getSelectedId();
       if (!id) { alert('先點一下要編輯的標記'); return; }
       const m = markers.get(id); if (!m) return;
+      if(m.__uid !== auth.currentUser.uid){ alert('只能編輯自己的標記'); return; }
       const cur = m.options.title || '';
       const title = prompt('新的標題：', cur);
       if (title == null) return;
@@ -225,8 +248,11 @@
 
     $('btnDel').onclick = async (e)=>{
       e.preventDefault();
+      if(!auth.currentUser){ alert('尚未登入'); return; }
       const id = getSelectedId();
       if (!id) { alert('先點一下要刪除的標記'); return; }
+      const m = markers.get(id); if (!m) return;
+      if(m.__uid !== auth.currentUser.uid){ alert('只能刪除自己的標記'); return; }
       if (!confirm('確定刪除此標記？')) return;
       try{
         await deleteDoc(doc(colRef, id));
