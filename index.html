@@ -4,10 +4,11 @@
 <div id="map" style="height:100vh"></div>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
-const W=2048, H=2048, IMG='map.png'; // ← 檔名大小寫要完全一致
+const W=2048, H=2048, IMG='map.png'; 
 const map = L.map('map', { crs: L.CRS.Simple, minZoom: -3 });
 const sw = L.point(0, H), ne = L.point(W, 0);
 const bounds = L.latLngBounds(map.unproject(sw, 0), map.unproject(ne, 0));
 L.imageOverlay(IMG, bounds).addTo(map);
 map.fitBounds(bounds);
 </script>
+
