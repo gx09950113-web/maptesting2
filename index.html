@@ -24,7 +24,12 @@
       max-width:40ch; background:#2b1e1e; color:#ffdede; padding:10px 12px; border:1px solid #5d2b2b; border-radius:10px;
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; white-space:pre-wrap;
     }
-  </style>
+  </style>/* NEW: 彩色圓點標記樣式 */
+.u-dot { background: transparent; border: none; }
+.u-dot .dot {
+  width: 16px; height: 16px; border-radius: 50%;
+  border: 2px solid #fff; box-shadow: 0 0 0 2px rgba(0,0,0,.35);
+}
 </head>
 <body>
 
@@ -230,3 +235,4 @@
   </script>
 </body>
 </html>
+
